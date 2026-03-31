@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Web Annotator</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 420px;
+      max-height: 520px;
+      overflow-y: auto;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      color: #1a1a1a;
+      background: #fff;
+    }
+
+    #sticky-top {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: #fff;
+    }
+
+    header {
+      padding: 12px 14px 10px;
+      border-bottom: 1px solid #f0f0f0;
+    }
+
+    header h1 {
+      font-size: 14px;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    header .page-url {
+      font-size: 11px;
+      color: #888;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 2px;
+    }
+
+    /* ── Tabs ── */
+
+    .tabs {
+      display: flex;
+      padding: 0 14px;
+      border-bottom: 1px solid #f0f0f0;
+    }
+
+    .tab-btn {
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      padding: 8px 10px;
+      font-size: 12.5px;
+      font-weight: 500;
+      color: #888;
+      cursor: pointer;
+      font-family: inherit;
+      margin-bottom: -1px;
+      transition: color 0.15s;
+    }
+
+    .tab-btn:hover {
+      color: #444;
+    }
+
+    .tab-btn.active {
+      color: #1a73e8;
+      border-bottom-color: #1a73e8;
+    }
+
+    .tab-count {
+      display: inline-block;
+      background: #f0f0f0;
+      color: #666;
+      font-size: 10px;
+      font-weight: 600;
+      border-radius: 10px;
+      padding: 1px 6px;
+      margin-left: 4px;
+      vertical-align: middle;
+    }
+
+    .tab-btn.active .tab-count {
+      background: #e8f0fe;
+      color: #1a73e8;
+    }
+
+    /* ── Content ── */
+
+    .empty-state {
+      padding: 32px 16px;
+      text-align: center;
+      color: #888;
+    }
+
+    .annotation-list {
+      padding: 6px 0;
+    }
+
+    .annotation-item {
+      padding: 10px 14px;
+      border-bottom: 1px solid #f5f5f5;
+    }
+
+    .annotation-item:last-child {
+      border-bottom: none;
+    }
+
+    .annotation-text {
+      color: #1a1a1a;
+      line-height: 1.4;
+      margin-bottom: 4px;
+    }
+
+    .annotation-text::before {
+      content: '"';
+      color: #f5a623;
+      font-size: 15px;
+      font-weight: bold;
+      margin-right: 2px;
+    }
+
+    .annotation-comment {
+      font-style: italic;
+      color: #555;
+      font-size: 12px;
+      margin-top: 4px;
+      line-height: 1.4;
+    }
+
+    .annotation-time {
+      font-size: 11px;
+      color: #aaa;
+      margin-top: 4px;
+    }
+
+    /* ── Footer ── */
+
+    footer {
+      padding: 10px 14px;
+      border-top: 1px solid #f0f0f0;
+      position: sticky;
+      bottom: 0;
+      background: #fff;
+    }
+
+    .footer-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    .footer-row + .footer-row {
+      margin-top: 6px;
+    }
+
+    footer button {
+      flex: 1;
+      padding: 7px 0;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+
+    #copy-llm-btn {
+      background: #1a1a1a;
+      color: #fff;
+    }
+
+    #copy-llm-btn:hover { background: #333; }
+
+    #copy-notes-btn {
+      background: #1a1a1a;
+      color: #fff;
+    }
+
+    #copy-notes-btn:hover { background: #333; }
+
+    #panel-btn {
+      background: #f5f5f5;
+      color: #1a1a1a;
+    }
+
+    #panel-btn:hover { background: #e8e8e8; }
+
+    #clear-btn {
+      background: #f5f5f5;
+      color: #d32f2f;
+    }
+
+    #clear-btn:hover { background: #ffe0e0; }
+
+    /* ── All Sites list ── */
+
+    .site-item {
+      padding: 10px 14px;
+      border-bottom: 1px solid #f5f5f5;
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+
+    .site-item:last-child { border-bottom: none; }
+
+    .site-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .site-title {
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .site-url {
+      font-size: 11px;
+      color: #888;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 1px;
+    }
+
+    .site-meta {
+      font-size: 11px;
+      color: #aaa;
+      margin-top: 3px;
+    }
+
+    .site-delete {
+      background: none;
+      border: none;
+      color: #ccc;
+      font-size: 15px;
+      cursor: pointer;
+      padding: 2px 4px;
+      border-radius: 4px;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+
+    .site-delete:hover {
+      color: #d32f2f;
+      background: #fff0f0;
+    }
+
+    /* ── Storage indicator ── */
+
+    .storage-bar {
+      padding: 6px 14px;
+      font-size: 12px;
+      color: #777;
+      border-top: 1px solid #f0f0f0;
+      background: #fafafa;
+      text-align: right;
+    }
+
+    .storage-notice {
+      padding: 6px 14px 8px;
+      font-size: 12px;
+      color: #777;
+      background: #fafafa;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div id="sticky-top">
+    <header>
+      <h1 id="page-title">Loading…</h1>
+      <div class="page-url" id="page-url"></div>
+    </header>
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="all">
+        All <span class="tab-count" id="count-all">0</span>
+      </button>
+      <button class="tab-btn" data-tab="notes">
+        With Notes <span class="tab-count" id="count-notes">0</span>
+      </button>
+      <button class="tab-btn" data-tab="sites">
+        All Sites <span class="tab-count" id="count-sites">0</span>
+      </button>
+    </div>
+  </div>
+
+  <div id="content">
+    <div class="annotation-list" id="annotation-list"></div>
+  </div>
+
+  <footer id="footer" style="display:none">
+    <div class="footer-row">
+      <button id="copy-llm-btn">Copy for LLM</button>
+      <button id="copy-notes-btn">Copy as Notes</button>
+    </div>
+    <div class="footer-row">
+      <button id="panel-btn">Panel</button>
+      <button id="clear-btn">Clear All</button>
+    </div>
+  </footer>
+
+  <div class="storage-bar" id="storage-bar"></div>
+  <div class="storage-notice">Data is stored locally in your browser and never uploaded. Clearing browser data may delete your notes.</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
