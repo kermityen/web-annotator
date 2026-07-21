@@ -18,6 +18,8 @@
   }
 
   const PAGE_URL = normalizeUrl(window.location.href);
+  const PAGE_HOST = (() => { try { return new URL(window.location.href).hostname; } catch { return ''; } })();
+  let siteEnabled = true;
 
   // ── Extension context guard ───────────────────────────────────────────────
 
@@ -229,6 +231,7 @@
 
   document.addEventListener('mouseup', (e) => {
     setTimeout(() => {
+      if (!siteEnabled) return;
       if (selPopover && selPopover.contains(e.target)) return;
       if (activeMarkPopover && activeMarkPopover.contains(e.target)) return;
 
@@ -349,6 +352,7 @@
   });
 
   document.addEventListener('click', (e) => {
+    if (!siteEnabled) return;
     const mark = e.target.closest('.wa-highlight');
     if (mark) {
       e.stopPropagation();
@@ -424,6 +428,7 @@
 
   let reviewPanel = null;
   let panelTab = null;
+  let panelDeselected = new Set(); // ids excluded from export; default = everything selected
 
   function escapeHtml(str) {
     return String(str)
@@ -433,6 +438,61 @@
 
   function truncateText(str, max = 100) {
     return str.length > max ? str.slice(0, max) + '…' : str;
+  }
+
+  function panelItemHtml(ann) {
+    return `
+      <div class="wa-panel-item" data-id="${escapeHtml(ann.id)}">
+        <input type="checkbox" class="wa-panel-check" ${panelDeselected.has(ann.id) ? '' : 'checked'}>
+        <div class="wa-panel-item-body">
+          <div class="wa-panel-quote">${escapeHtml(truncateText(ann.text))}</div>
+          ${ann.comment && ann.comment.trim()
+            ? `<div class="wa-panel-note">${escapeHtml(ann.comment)}</div>`
+            : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  function updatePanelExportUI() {
+    if (!reviewPanel) return;
+    const boxes = reviewPanel.querySelectorAll('.wa-panel-check');
+    const sel = reviewPanel.querySelectorAll('.wa-panel-check:checked').length;
+    const llmBtn = reviewPanel.querySelector('.wa-panel-copy-llm');
+    const notesBtn = reviewPanel.querySelector('.wa-panel-copy-notes');
+    if (llmBtn) llmBtn.disabled = sel === 0;
+    if (notesBtn) notesBtn.disabled = sel === 0;
+    const countEl = reviewPanel.querySelector('.wa-panel-export-count');
+    if (countEl) {
+      countEl.textContent = boxes.length === 0 ? '' : `${sel} / ${boxes.length} selected`;
+    }
+    const selectAll = reviewPanel.querySelector('.wa-panel-select-all');
+    if (selectAll) {
+      selectAll.checked = boxes.length > 0 && sel === boxes.length;
+      selectAll.indeterminate = sel > 0 && sel < boxes.length;
+    }
+  }
+
+  function bindPanelItems(rootEl) {
+    rootEl.querySelectorAll('.wa-panel-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const id = item.dataset.id;
+        const mark = document.querySelector(`.wa-highlight[data-annotation-id="${CSS.escape(id)}"]`);
+        if (!mark) return;
+        mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        mark.classList.add('wa-highlight-flash');
+        setTimeout(() => mark.classList.remove('wa-highlight-flash'), 1400);
+      });
+      const cb = item.querySelector('.wa-panel-check');
+      if (cb) {
+        cb.addEventListener('click', (e) => e.stopPropagation());
+        cb.addEventListener('change', () => {
+          const id = item.dataset.id;
+          if (cb.checked) panelDeselected.delete(id); else panelDeselected.add(id);
+          updatePanelExportUI();
+        });
+      }
+    });
   }
 
   function closeReviewPanel() {
@@ -455,28 +515,13 @@
 
     if (annotations.length === 0) {
       body.innerHTML = '<div class="wa-panel-empty">No highlights on this page yet.</div>';
+      updatePanelExportUI();
       return;
     }
 
-    body.innerHTML = annotations.map(ann => `
-      <div class="wa-panel-item" data-id="${escapeHtml(ann.id)}">
-        <div class="wa-panel-quote">${escapeHtml(truncateText(ann.text))}</div>
-        ${ann.comment && ann.comment.trim()
-          ? `<div class="wa-panel-note">${escapeHtml(ann.comment)}</div>`
-          : ''}
-      </div>
-    `).join('');
-
-    body.querySelectorAll('.wa-panel-item').forEach(item => {
-      item.addEventListener('click', () => {
-        const id = item.dataset.id;
-        const mark = document.querySelector(`.wa-highlight[data-annotation-id="${CSS.escape(id)}"]`);
-        if (!mark) return;
-        mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        mark.classList.add('wa-highlight-flash');
-        setTimeout(() => mark.classList.remove('wa-highlight-flash'), 1400);
-      });
-    });
+    body.innerHTML = annotations.map(panelItemHtml).join('');
+    bindPanelItems(body);
+    updatePanelExportUI();
   }
 
   async function openReviewPanel() {
@@ -488,25 +533,26 @@
 
     const itemsHtml = annotations.length === 0
       ? '<div class="wa-panel-empty">No highlights on this page yet.</div>'
-      : annotations.map(ann => `
-          <div class="wa-panel-item" data-id="${escapeHtml(ann.id)}">
-            <div class="wa-panel-quote">${escapeHtml(truncateText(ann.text))}</div>
-            ${ann.comment && ann.comment.trim()
-              ? `<div class="wa-panel-note">${escapeHtml(ann.comment)}</div>`
-              : ''}
-          </div>
-        `).join('');
+      : annotations.map(panelItemHtml).join('');
 
     panel.innerHTML = `
       <div class="wa-panel-header">
         <span class="wa-panel-title">Highlights <span class="wa-panel-count">${annotations.length}</span></span>
         <button class="wa-panel-close">✕</button>
       </div>
+      <div class="wa-panel-selectbar">
+        <label><input type="checkbox" class="wa-panel-select-all" checked> Select all</label>
+      </div>
       <div class="wa-panel-body">${itemsHtml}</div>
       <div class="wa-panel-footer">
-        <button class="wa-panel-copy-llm">Copy for LLM</button>
-        <button class="wa-panel-copy-notes">Copy as Notes</button>
-        <button class="wa-panel-clear">Clear All</button>
+        <div class="wa-panel-export-count"></div>
+        <div class="wa-panel-footer-row">
+          <button class="wa-panel-copy-llm">Copy for LLM</button>
+          <button class="wa-panel-copy-notes">Copy as Notes</button>
+        </div>
+        <div class="wa-panel-footer-row">
+          <button class="wa-panel-clear">Clear All</button>
+        </div>
       </div>
     `;
 
@@ -514,21 +560,26 @@
       closeReviewPanel();
     });
 
-    panel.querySelectorAll('.wa-panel-item').forEach(item => {
-      item.addEventListener('click', () => {
-        const id = item.dataset.id;
-        const mark = document.querySelector(`.wa-highlight[data-annotation-id="${CSS.escape(id)}"]`);
-        if (!mark) return;
-        mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        mark.classList.add('wa-highlight-flash');
-        setTimeout(() => mark.classList.remove('wa-highlight-flash'), 1400);
+    bindPanelItems(panel);
+
+    // Select all / deselect all
+    panel.querySelector('.wa-panel-select-all').addEventListener('change', (e) => {
+      const boxes = panel.querySelectorAll('.wa-panel-check');
+      boxes.forEach(cb => {
+        cb.checked = e.target.checked;
+        const id = cb.closest('.wa-panel-item').dataset.id;
+        if (e.target.checked) panelDeselected.delete(id); else panelDeselected.add(id);
       });
+      updatePanelExportUI();
     });
 
     // Copy for LLM
     panel.querySelector('.wa-panel-copy-llm').addEventListener('click', async () => {
       const pd = await getPageData();
-      const sorted = (pd.annotations || []).slice().sort((a, b) => a.createdAt - b.createdAt);
+      const sorted = (pd.annotations || []).slice()
+        .filter(ann => !panelDeselected.has(ann.id))
+        .sort((a, b) => a.createdAt - b.createdAt);
+      if (sorted.length === 0) return;
       const date = new Date().toISOString().slice(0, 10);
       const lines = [
         '# Page Notes', '',
@@ -548,7 +599,10 @@
     // Copy as Notes
     panel.querySelector('.wa-panel-copy-notes').addEventListener('click', async () => {
       const pd = await getPageData();
-      const sorted = (pd.annotations || []).slice().sort((a, b) => a.createdAt - b.createdAt);
+      const sorted = (pd.annotations || []).slice()
+        .filter(ann => !panelDeselected.has(ann.id))
+        .sort((a, b) => a.createdAt - b.createdAt);
+      if (sorted.length === 0) return;
       const lines = [
         `# ${pd.title}`,
         `${pd.url}`,
@@ -582,6 +636,7 @@
 
     document.body.appendChild(panel);
     reviewPanel = panel;
+    updatePanelExportUI();
     requestAnimationFrame(() => panel.classList.add('wa-panel-open'));
     if (panelTab) panelTab.classList.add('wa-panel-tab-active');
   }
@@ -605,7 +660,19 @@
     document.body.appendChild(panelTab);
   }
 
-  initPanelTab();
+  // ── Load site toggle state ────────────────────────────────────────────────
+
+  (async function loadSiteToggle() {
+    if (!isContextValid()) return;
+    try {
+      const result = await chrome.storage.local.get('wa_disabled_sites');
+      const disabled = result.wa_disabled_sites || [];
+      if (disabled.includes(PAGE_HOST)) {
+        siteEnabled = false;
+      }
+    } catch {}
+    if (siteEnabled) initPanelTab();
+  })();
 
   // ── Restore highlights on page load ─────────────────────────────────────
 
@@ -730,6 +797,18 @@
         setTimeout(initPanelTab, 50);
       }
       if (msg.type === 'WA_TOGGLE_PANEL') toggleReviewPanel();
+      if (msg.type === 'WA_TOGGLE_SITE') {
+        siteEnabled = msg.enabled !== undefined ? msg.enabled : !siteEnabled;
+        if (!siteEnabled) {
+          removeSelPopover();
+          removeHoverToolbar();
+          closeMarkPopover(false);
+          closeReviewPanel();
+          if (panelTab) { panelTab.remove(); panelTab = null; }
+        } else {
+          initPanelTab();
+        }
+      }
     });
   }
 

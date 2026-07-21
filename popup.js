@@ -83,7 +83,7 @@ function buildNotesMarkdown(pageData, annotationsList) {
 }
 
 
-function renderList(annotations, container) {
+function renderList(annotations, container, selectedIds, onToggle) {
   container.innerHTML = '';
 
   if (annotations.length === 0) {
@@ -95,10 +95,18 @@ function renderList(annotations, container) {
     const item = document.createElement('div');
     item.className = 'annotation-item';
     item.innerHTML = `
-      <div class="annotation-text">${escapeHtml(truncate(ann.text))}</div>
-      ${ann.comment && ann.comment.trim() ? `<div class="annotation-comment">${escapeHtml(ann.comment)}</div>` : ''}
-      <div class="annotation-time">${timeAgo(ann.createdAt)}</div>
+      <input type="checkbox" class="annotation-check" ${selectedIds.has(ann.id) ? 'checked' : ''}>
+      <div class="annotation-body">
+        <div class="annotation-text">${escapeHtml(truncate(ann.text))}</div>
+        ${ann.comment && ann.comment.trim() ? `<div class="annotation-comment">${escapeHtml(ann.comment)}</div>` : ''}
+        <div class="annotation-time">${timeAgo(ann.createdAt)}</div>
+      </div>
     `;
+    const cb = item.querySelector('.annotation-check');
+    cb.addEventListener('change', () => {
+      if (cb.checked) selectedIds.add(ann.id); else selectedIds.delete(ann.id);
+      if (onToggle) onToggle();
+    });
     container.appendChild(item);
   }
 }
@@ -175,6 +183,26 @@ async function init() {
 
   document.getElementById('page-url').textContent = url;
 
+  // Site toggle
+  const siteToggle = document.getElementById('site-toggle');
+  const hostname = (() => { try { return new URL(tab.url).hostname; } catch { return ''; } })();
+  const toggleData = await chrome.storage.local.get('wa_disabled_sites');
+  const disabledSites = toggleData.wa_disabled_sites || [];
+  siteToggle.checked = !disabledSites.includes(hostname);
+
+  siteToggle.addEventListener('change', async () => {
+    const data = await chrome.storage.local.get('wa_disabled_sites');
+    const sites = data.wa_disabled_sites || [];
+    if (siteToggle.checked) {
+      const updated = sites.filter(s => s !== hostname);
+      await chrome.storage.local.set({ wa_disabled_sites: updated });
+    } else {
+      if (!sites.includes(hostname)) sites.push(hostname);
+      await chrome.storage.local.set({ wa_disabled_sites: sites });
+    }
+    try { await chrome.tabs.sendMessage(tab.id, { type: 'WA_TOGGLE_SITE', enabled: siteToggle.checked }); } catch {}
+  });
+
   const result = await chrome.storage.local.get(url);
   const pageData = result[url];
 
@@ -198,9 +226,49 @@ async function init() {
     footer.style.display = 'block';
   }
 
-  // Initial render
+  // Selection state — default: everything selected
+  const selectedIds = new Set(sorted.map(a => a.id));
+  const selectAllRow = document.getElementById('select-all-row');
+  const selectAllBox = document.getElementById('select-all');
+  const copyLlmBtn = document.getElementById('copy-llm-btn');
+  const copyNotesBtn = document.getElementById('copy-notes-btn');
+
   let activeTab = 'all';
-  renderList(sorted, list);
+
+  function currentTabList() {
+    return activeTab === 'notes' ? withNotes : sorted;
+  }
+
+  function selectedOf(listArr) {
+    return listArr.filter(a => selectedIds.has(a.id));
+  }
+
+  function updateSelectionUI() {
+    const listArr = currentTabList();
+    const sel = selectedOf(listArr).length;
+    selectAllBox.checked = listArr.length > 0 && sel === listArr.length;
+    selectAllBox.indeterminate = sel > 0 && sel < listArr.length;
+    const countEl = document.getElementById('export-count');
+    countEl.textContent = listArr.length === 0 ? '' : `${sel} / ${listArr.length} selected`;
+    copyLlmBtn.disabled = sel === 0;
+    copyNotesBtn.disabled = sel === 0;
+  }
+
+  selectAllBox.addEventListener('change', () => {
+    const listArr = currentTabList();
+    if (selectAllBox.checked) {
+      listArr.forEach(a => selectedIds.add(a.id));
+    } else {
+      listArr.forEach(a => selectedIds.delete(a.id));
+    }
+    renderList(listArr, list, selectedIds, updateSelectionUI);
+    updateSelectionUI();
+  });
+
+  // Initial render
+  renderList(sorted, list, selectedIds, updateSelectionUI);
+  if (sorted.length > 0) selectAllRow.style.display = 'flex';
+  updateSelectionUI();
 
   // Tab switching
   document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -211,6 +279,7 @@ async function init() {
 
       if (activeTab === 'sites') {
         footer.style.display = 'none';
+        selectAllRow.style.display = 'none';
         const sites = await getAllSites();
         document.getElementById('count-sites').textContent = sites.length;
         renderSitesList(sites, list, async () => {
@@ -221,7 +290,10 @@ async function init() {
         });
       } else {
         if (sorted.length > 0) footer.style.display = 'block';
-        renderList(activeTab === 'all' ? sorted : withNotes, list);
+        const listArr = currentTabList();
+        selectAllRow.style.display = listArr.length > 0 ? 'flex' : 'none';
+        renderList(listArr, list, selectedIds, updateSelectionUI);
+        updateSelectionUI();
       }
     });
   });
@@ -233,9 +305,9 @@ async function init() {
   });
 
   // Copy for LLM
-  const copyLlmBtn = document.getElementById('copy-llm-btn');
   copyLlmBtn.addEventListener('click', async () => {
-    const currentList = activeTab === 'notes' ? withNotes : sorted;
+    const currentList = selectedOf(currentTabList());
+    if (currentList.length === 0) return;
     const md = buildLlmMarkdown(pageData, currentList);
     await navigator.clipboard.writeText(md);
     copyLlmBtn.textContent = 'Copied!';
@@ -243,9 +315,9 @@ async function init() {
   });
 
   // Copy as Notes
-  const copyNotesBtn = document.getElementById('copy-notes-btn');
   copyNotesBtn.addEventListener('click', async () => {
-    const currentList = activeTab === 'notes' ? withNotes : sorted;
+    const currentList = selectedOf(currentTabList());
+    if (currentList.length === 0) return;
     const md = buildNotesMarkdown(pageData, currentList);
     await navigator.clipboard.writeText(md);
     copyNotesBtn.textContent = 'Copied!';
@@ -259,6 +331,8 @@ async function init() {
     try { await chrome.tabs.sendMessage(tab.id, { type: 'WA_CLEAR_ALL' }); } catch { }
     list.innerHTML = '<div class="empty-state">No annotations on this page.</div>';
     footer.style.display = 'none';
+    selectAllRow.style.display = 'none';
+    selectedIds.clear();
     document.getElementById('count-all').textContent = '0';
     document.getElementById('count-notes').textContent = '0';
     // Refresh sites count

@@ -14,6 +14,7 @@ FEATURES
 - Review all highlights in a side panel
 - Copy for LLM — formatted markdown with source context, ready to paste into ChatGPT or Claude
 - Copy as Notes — clean list format for Notion, Obsidian, or any note-taking app
+- Pick exactly which highlights to export — everything is selected by default, untick what you don't need
 - Highlights restore automatically when you revisit the page
 - Storage usage indicator so you always know how much space is used
 - Works on all websites including SPAs (React, Next.js, etc.)
