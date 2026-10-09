@@ -1,7 +1,15 @@
 // Content script: injected into every page
+//
+// Privacy model: the extension's own UI (popovers, note editor, review panel, toast) lives in a
+// CLOSED shadow root, so page scripts can neither read your notes nor click our buttons. The only
+// thing written into the page's own DOM is the <mark> around highlighted text, and it never
+// carries note text.
 
 (function () {
   'use strict';
+
+  // Only regular web pages. An SVG image or XML file opened in a tab has no HTML body to work with.
+  if (!document.body || document.documentElement.namespaceURI !== 'http://www.w3.org/1999/xhtml') return;
 
   // ── URL normalization ─────────────────────────────────────────────────────
 
@@ -19,7 +27,7 @@
 
   const PAGE_URL = normalizeUrl(window.location.href);
   const PAGE_HOST = (() => { try { return new URL(window.location.href).hostname; } catch { return ''; } })();
-  let siteEnabled = true;
+  let siteEnabled = false; // stays inert until the per-site setting has been read
 
   // ── Extension context guard ───────────────────────────────────────────────
 
@@ -27,43 +35,99 @@
     try { return !!chrome.runtime?.id; } catch { return false; }
   }
 
-  // ── Storage ───────────────────────────────────────────────────────────────
+  // ── IDs ───────────────────────────────────────────────────────────────────
 
+  // crypto.randomUUID() only exists in secure contexts, so it is undefined on plain http://
+  // pages. getRandomValues() is available everywhere.
+  function newId() {
+    if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // ── Storage ───────────────────────────────────────────────────────────────
+  // Writes return true on success. On failure they tell the user why and return false, so the
+  // UI never shows a highlight or note as saved when it is not.
+
+  function emptyPageData() {
+    return { url: PAGE_URL, title: document.title, annotations: [], lastVisited: Date.now() };
+  }
+
+  // Lenient read, for display only.
   async function getPageData() {
-    if (!isContextValid()) return { url: PAGE_URL, title: document.title, annotations: [], lastVisited: Date.now() };
+    if (!isContextValid()) return emptyPageData();
     try {
       const result = await chrome.storage.local.get(PAGE_URL);
-      return result[PAGE_URL] || { url: PAGE_URL, title: document.title, annotations: [], lastVisited: Date.now() };
-    } catch { return { url: PAGE_URL, title: document.title, annotations: [], lastVisited: Date.now() }; }
+      return result[PAGE_URL] || emptyPageData();
+    } catch { return emptyPageData(); }
   }
 
-  async function saveAnnotation(annotation) {
-    if (!isContextValid()) return;
+  function reportWriteFailure(err) {
+    const reason = String((err && err.message) || err || '');
+    // Right after an update, chrome.runtime.id can still be set while every call already
+    // throws "Extension context invalidated", so check the error too.
+    if (!isContextValid() || /context invalidated/i.test(reason)) {
+      showToast('Web Annotator was updated. Reload this page to keep saving highlights.');
+    } else if (/quota/i.test(reason)) {
+      showToast('Storage is full, so this was not saved. Delete old highlights from the extension popup to free up space.');
+    } else {
+      showToast('Web Annotator could not save this change.');
+    }
+  }
+
+  // Strict read-modify-write. A failed read must never be mistaken for an empty page, or the
+  // write would wipe the page's other highlights. `mutate` returns false to abort the write.
+  async function writePage(mutate) {
+    if (!isContextValid()) { reportWriteFailure(); return false; }
     try {
-      const pageData = await getPageData();
+      const result = await chrome.storage.local.get(PAGE_URL);
+      const pageData = result[PAGE_URL] || emptyPageData();
+      if (mutate(pageData) === false) return false;
+      if (pageData.annotations.length === 0) {
+        await chrome.storage.local.remove(PAGE_URL); // no invisible empty records left behind
+      } else {
+        await chrome.storage.local.set({ [PAGE_URL]: pageData });
+      }
+      return true;
+    } catch (err) {
+      reportWriteFailure(err);
+      return false;
+    }
+  }
+
+  function saveAnnotation(annotation) {
+    return writePage(pageData => {
       pageData.annotations.push(annotation);
       pageData.lastVisited = Date.now();
-      await chrome.storage.local.set({ [PAGE_URL]: pageData });
-    } catch { }
+    });
   }
 
-  async function deleteAnnotationById(id) {
-    if (!isContextValid()) return;
-    try {
-      const pageData = await getPageData();
+  function deleteAnnotationById(id) {
+    return writePage(pageData => {
       pageData.annotations = pageData.annotations.filter(a => a.id !== id);
-      await chrome.storage.local.set({ [PAGE_URL]: pageData });
-    } catch { }
+    });
   }
 
-  async function updateCommentById(id, comment) {
-    if (!isContextValid()) return;
-    try {
-      const pageData = await getPageData();
+  function updateCommentById(id, comment) {
+    return writePage(pageData => {
       const ann = pageData.annotations.find(a => a.id === id);
-      if (ann) ann.comment = comment;
-      await chrome.storage.local.set({ [PAGE_URL]: pageData });
-    } catch { }
+      if (!ann) {
+        showToast('This highlight was removed, so the note could not be saved.');
+        return false;
+      }
+      ann.comment = comment;
+    });
+  }
+
+  async function clearPageData() {
+    if (!isContextValid()) { reportWriteFailure(); return false; }
+    try {
+      await chrome.storage.local.remove(PAGE_URL);
+      return true;
+    } catch (err) {
+      reportWriteFailure(err);
+      return false;
+    }
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -76,32 +140,132 @@
     return el.tagName.toLowerCase();
   }
 
-  function isInsideExtensionUI(node) {
-    if (!node) return false;
-    const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
-    return !!(el && el.closest('.wa-sel-popover, .wa-mark-popover, .wa-hover-toolbar, .wa-panel, .wa-panel-tab'));
+  // Text that must never be wrapped in <mark>: code, stylesheets, form fields, SVG/MathML, and
+  // anything editable (a <mark> inside someone's draft would end up in what they send).
+  const NON_CONTENT = 'script, style, noscript, textarea, template, title, option, select, svg, math';
+
+  function isHighlightableElement(el) {
+    return !!el && !el.isContentEditable && !el.closest(NON_CONTENT);
   }
 
-  // Returns true if the selection overlaps ANY existing highlight (full or partial)
-  function selectionOverlapsHighlight(sel) {
-    if (!sel || sel.rangeCount === 0) return false;
-    const range = sel.getRangeAt(0);
+  function isHighlightableTextNode(node) {
+    return isHighlightableElement(node.parentElement);
+  }
+
+  function rangeIsHighlightable(range) {
+    const toEl = n => (n.nodeType === Node.TEXT_NODE ? n.parentElement : n);
+    if (uiHost && range.intersectsNode(uiHost)) return false;
+    return isHighlightableElement(toEl(range.startContainer)) && isHighlightableElement(toEl(range.endContainer));
+  }
+
+  function focusIsInEditableField() {
+    const el = document.activeElement;
+    return !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+  }
+
+  // Returns true if the range overlaps ANY existing highlight (full or partial)
+  function selectionOverlapsHighlight(range) {
     return Array.from(document.querySelectorAll('.wa-highlight'))
       .some(mark => range.intersectsNode(mark));
   }
 
-  function syncCommentToMarks(id, comment) {
-    document.querySelectorAll(`.wa-highlight[data-annotation-id="${CSS.escape(id)}"]`).forEach(mark => {
-      mark.dataset.comment = comment;
-      mark.classList.toggle('has-comment', !!comment.trim());
-    });
+  function marksFor(id) {
+    return document.querySelectorAll(`.wa-highlight[data-annotation-id="${CSS.escape(id)}"]`);
+  }
+
+  // Marks carry only the annotation id and a has-comment flag, never the note itself.
+  function makeMark(id, hasComment) {
+    const mark = document.createElement('mark');
+    mark.className = hasComment ? 'wa-highlight has-comment' : 'wa-highlight';
+    mark.dataset.annotationId = id;
+    return mark;
+  }
+
+  function setHasComment(id, comment) {
+    marksFor(id).forEach(mark => mark.classList.toggle('has-comment', !!comment.trim()));
+  }
+
+  function unwrapMark(mark) {
+    const parent = mark.parentNode;
+    if (!parent) return;
+    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+    mark.remove();
   }
 
   function unwrapHighlight(id) {
-    document.querySelectorAll(`.wa-highlight[data-annotation-id="${CSS.escape(id)}"]`).forEach(mark => {
-      const parent = mark.parentNode;
-      while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
-      mark.remove();
+    marksFor(id).forEach(unwrapMark);
+  }
+
+  function unwrapAll() {
+    document.querySelectorAll('.wa-highlight').forEach(unwrapMark);
+  }
+
+  // ── UI host (closed shadow root) ──────────────────────────────────────────
+
+  let uiHost = null;
+  let uiRoot = null;
+
+  function ui() {
+    if (!uiHost) {
+      uiHost = document.createElement('div');
+      // Inline !important so page CSS cannot hide, move, or restyle the host.
+      const hostStyle = {
+        all: 'initial', position: 'absolute', top: '0', left: '0', width: '0', height: '0',
+        overflow: 'visible', display: 'block', 'z-index': '2147483647',
+      };
+      for (const [prop, value] of Object.entries(hostStyle)) uiHost.style.setProperty(prop, value, 'important');
+      uiRoot = uiHost.attachShadow({ mode: 'closed' });
+      applyUiStyles(uiRoot);
+      bindUiRootEvents(uiRoot);
+    }
+    if (!uiHost.isConnected) document.documentElement.appendChild(uiHost);
+    return uiRoot;
+  }
+
+  function applyUiStyles(root) {
+    try {
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(WA_UI_CSS); // defined in ui-styles.js
+      root.adoptedStyleSheets = [sheet];
+    } catch {
+      const style = document.createElement('style');
+      style.textContent = WA_UI_CSS;
+      root.appendChild(style);
+    }
+  }
+
+  function detachUi() {
+    if (uiHost) uiHost.remove();
+  }
+
+  // True when an event started inside our UI. Seen from outside the closed shadow root, the
+  // event's path stops at the host.
+  function fromUI(e) {
+    return !!uiHost && e.composedPath().includes(uiHost);
+  }
+
+  function pathHasClass(path, cls) {
+    return path.some(n => n.classList && n.classList.contains(cls));
+  }
+
+  function bindUiRootEvents(root) {
+    // Keep typing inside our UI to ourselves: page keyboard shortcuts must not fire while you
+    // write a note, and the page's key listeners should not see what you type.
+    for (const type of ['keydown', 'keyup', 'keypress', 'beforeinput', 'input',
+      'compositionstart', 'compositionupdate', 'compositionend', 'paste', 'copy', 'cut']) {
+      root.addEventListener(type, (e) => e.stopPropagation());
+    }
+
+    // A press inside our UI dismisses whichever floating piece it did not land on.
+    root.addEventListener('mousedown', (e) => {
+      if (!e.isTrusted) return;
+      const path = e.composedPath();
+      const inSel = pathHasClass(path, 'wa-sel-popover');
+      const inToolbar = pathHasClass(path, 'wa-hover-toolbar');
+      const inNote = pathHasClass(path, 'wa-mark-popover');
+      if (selPopover && !inSel) removeSelPopover();
+      if (hoverToolbar && !inToolbar) removeHoverToolbar();
+      if (activeMarkPopover && !inNote && !inToolbar) closeMarkPopover(true);
     });
   }
 
@@ -109,19 +273,10 @@
 
   function showToast(msg) {
     const toast = document.createElement('div');
+    toast.className = 'wa-toast';
     toast.textContent = msg;
-    Object.assign(toast.style, {
-      position: 'fixed', bottom: '24px', left: '50%',
-      transform: 'translateX(-50%)',
-      background: '#1a1a1a', color: '#fff',
-      padding: '8px 16px', borderRadius: '6px',
-      fontSize: '13px', zIndex: '2147483647',
-      fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
-      boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
-      pointerEvents: 'none'
-    });
-    document.body.appendChild(toast);
-    setTimeout(() => toast.remove(), 3000);
+    ui().appendChild(toast);
+    setTimeout(() => toast.remove(), 4000);
   }
 
   // ── Multi-node highlight helpers ──────────────────────────────────────────
@@ -137,6 +292,7 @@
 
     while ((node = walker.nextNode())) {
       if (!range.intersectsNode(node)) continue;
+      if (!isHighlightableTextNode(node)) continue;
       let start = 0;
       let end = node.textContent.length;
       if (node === range.startContainer) start = range.startOffset;
@@ -152,10 +308,7 @@
 
     for (const { node, start, end } of textNodes) {
       const full = node.textContent;
-      const mark = document.createElement('mark');
-      mark.className = 'wa-highlight';
-      mark.dataset.annotationId = id;
-      mark.dataset.comment = '';
+      const mark = makeMark(id, false);
       mark.textContent = full.slice(start, end);
 
       const frag = document.createDocumentFragment();
@@ -171,7 +324,7 @@
   // ── Position helper ───────────────────────────────────────────────────────
 
   function positionAbove(el, rect) {
-    if (!el.parentNode) document.body.appendChild(el);
+    if (!el.parentNode) ui().appendChild(el);
     const pw = el.offsetWidth;
     const ph = el.offsetHeight;
     const centerX = window.scrollX + rect.left + rect.width / 2;
@@ -205,6 +358,7 @@
     `;
 
     el.querySelector('.wa-sel-hl-btn').addEventListener('mousedown', (e) => {
+      if (!e.isTrusted) return;
       e.preventDefault();
       e.stopPropagation();
       const r = capturedRange;
@@ -214,6 +368,7 @@
 
     // Note: immediately highlight, then open note input on the new mark
     el.querySelector('.wa-sel-note-btn').addEventListener('mousedown', async (e) => {
+      if (!e.isTrusted) return;
       e.preventDefault();
       e.stopPropagation();
       const r = capturedRange;
@@ -221,7 +376,7 @@
       if (!r) return;
       const id = await applyHighlight(r, '');
       if (!id) return;
-      const mark = document.querySelector(`.wa-highlight[data-annotation-id="${CSS.escape(id)}"]`);
+      const mark = marksFor(id)[0];
       if (mark) openMarkPopover(mark);
     });
 
@@ -230,54 +385,53 @@
   }
 
   document.addEventListener('mouseup', (e) => {
+    if (!e.isTrusted || fromUI(e)) return;
     setTimeout(() => {
       if (!siteEnabled) return;
-      if (selPopover && selPopover.contains(e.target)) return;
-      if (activeMarkPopover && activeMarkPopover.contains(e.target)) return;
 
       const sel = window.getSelection();
       if (!sel || sel.rangeCount === 0) { removeSelPopover(); return; }
       const text = sel.toString().trim();
       if (!text) { removeSelPopover(); return; }
-      if (isInsideExtensionUI(sel.anchorNode)) { removeSelPopover(); return; }
-      if (selectionOverlapsHighlight(sel)) { removeSelPopover(); return; }
-
       const range = sel.getRangeAt(0);
+      if (focusIsInEditableField() || !rangeIsHighlightable(range)) { removeSelPopover(); return; }
+      if (selectionOverlapsHighlight(range)) { removeSelPopover(); return; }
+
       showSelPopover(range.getBoundingClientRect(), range);
     }, 10);
   });
 
+  // Presses outside our UI close whatever is floating. Presses inside it are handled on the
+  // shadow root (see bindUiRootEvents).
   document.addEventListener('mousedown', (e) => {
-    if (selPopover && !selPopover.contains(e.target)) removeSelPopover();
+    if (!e.isTrusted || fromUI(e)) return;
+    removeSelPopover();
+    if (hoverToolbar && !e.target.closest?.('.wa-highlight')) removeHoverToolbar();
+    if (activeMarkPopover) closeMarkPopover(true);
   });
 
   // ── Apply highlight ───────────────────────────────────────────────────────
 
   // Returns the annotation id on success, null on failure
-  async function applyHighlight(range, comment) {
+  async function applyHighlight(range, comment = '') {
     if (!range) return null;
     const text = range.toString();
     if (!text.trim()) return null;
+    if (!rangeIsHighlightable(range)) return null;
 
-    const id = crypto.randomUUID();
+    const id = newId();
     const parentSelector = getParentSelector(range.startContainer);
     const startOffset = range.startOffset;
     const endOffset = range.endOffset;
+    const hasComment = !!comment.trim();
     let success = false;
 
     try {
-      const mark = document.createElement('mark');
-      mark.className = 'wa-highlight';
-      mark.dataset.annotationId = id;
-      mark.dataset.comment = comment || '';
-      if (comment && comment.trim()) mark.classList.add('has-comment');
-      range.surroundContents(mark);
+      range.surroundContents(makeMark(id, hasComment));
       success = true;
     } catch {
       success = wrapRangeInMarks(range, id);
-      if (success && comment && comment.trim()) {
-        syncCommentToMarks(id, comment);
-      }
+      if (success && hasComment) setHasComment(id, comment);
     }
 
     window.getSelection()?.removeAllRanges();
@@ -287,7 +441,11 @@
       return null;
     }
 
-    await saveAnnotation({ id, text, comment: comment || '', createdAt: Date.now(), startOffset, endOffset, parentSelector });
+    const saved = await saveAnnotation({ id, text, comment, createdAt: Date.now(), startOffset, endOffset, parentSelector });
+    if (!saved) {
+      unwrapHighlight(id); // never leave a highlight on screen that is not actually saved
+      return null;
+    }
     return id;
   }
 
@@ -322,38 +480,33 @@
     `;
 
     toolbar.querySelector('.wa-ht-unhighlight').addEventListener('mousedown', async (e) => {
+      if (!e.isTrusted) return;
       e.preventDefault();
       e.stopPropagation();
-      unwrapHighlight(id);
-      closeMarkPopover(false);
       removeHoverToolbar();
-      await deleteAnnotationById(id);
+      if (activeMarkId === id) closeMarkPopover(false);
+      if (!(await deleteAnnotationById(id))) return; // still saved, so keep it on screen
+      unwrapHighlight(id);
       if (reviewPanel) refreshReviewPanel();
     });
 
     toolbar.querySelector('.wa-ht-note').addEventListener('mousedown', (e) => {
+      if (!e.isTrusted) return;
       e.preventDefault();
       e.stopPropagation();
-      const targetMark = markEl;
       removeHoverToolbar();
-      openMarkPopover(targetMark);
+      openMarkPopover(markEl);
     });
 
-    document.body.appendChild(toolbar);
+    ui().appendChild(toolbar);
     positionAbove(toolbar, markEl.getBoundingClientRect());
     hoverToolbar = toolbar;
     hoverTarget = markEl;
   }
 
-  document.addEventListener('mousedown', (e) => {
-    if (hoverToolbar && !hoverToolbar.contains(e.target) && !e.target.closest('.wa-highlight')) {
-      removeHoverToolbar();
-    }
-  });
-
   document.addEventListener('click', (e) => {
-    if (!siteEnabled) return;
-    const mark = e.target.closest('.wa-highlight');
+    if (!e.isTrusted || !siteEnabled) return;
+    const mark = e.target.closest?.('.wa-highlight');
     if (mark) {
       e.stopPropagation();
       showHoverToolbar(mark);
@@ -363,27 +516,50 @@
   // ── Note / comment popover ────────────────────────────────────────────────
 
   let activeMarkPopover = null;
-  let activeMarkEl = null;
+  let activeMarkId = null;
+  let activeMarkOriginal = '';
+  let noteSaving = false;
+  let noteOpenToken = 0;
 
-  function closeMarkPopover(save) {
-    if (!activeMarkPopover) return;
-    if (save && activeMarkEl) {
-      const textarea = activeMarkPopover.querySelector('textarea');
-      const comment = textarea ? textarea.value : '';
-      syncCommentToMarks(activeMarkEl.dataset.annotationId, comment);
-      updateCommentById(activeMarkEl.dataset.annotationId, comment);
-      if (reviewPanel) refreshReviewPanel();
+  async function closeMarkPopover(save) {
+    const popover = activeMarkPopover;
+    if (!popover || noteSaving) return;
+    const id = activeMarkId;
+
+    if (save && id) {
+      const comment = popover.querySelector('textarea').value;
+      if (comment !== activeMarkOriginal) {
+        noteSaving = true;
+        const ok = await updateCommentById(id, comment);
+        noteSaving = false;
+        if (!ok) return; // keep the editor open so what was typed is not lost
+        setHasComment(id, comment);
+        if (reviewPanel) refreshReviewPanel();
+      }
     }
-    activeMarkPopover.remove();
-    activeMarkPopover = null;
-    activeMarkEl = null;
+
+    if (activeMarkPopover === popover) {
+      popover.remove();
+      activeMarkPopover = null;
+      activeMarkId = null;
+      activeMarkOriginal = '';
+    }
   }
 
-  function openMarkPopover(markEl) {
-    closeMarkPopover(true);
+  async function openMarkPopover(markEl) {
+    const token = ++noteOpenToken;
+    await closeMarkPopover(true);
+    if (activeMarkPopover) return; // the previous note could not be saved, so it stays open
+    if (!isContextValid()) { reportWriteFailure(); return; }
 
-    const rect = markEl.getBoundingClientRect();
-    const existingComment = markEl.dataset.comment || '';
+    // The note is read from storage on demand; it is never kept in the page's DOM.
+    const id = markEl.dataset.annotationId;
+    const pageData = await getPageData();
+    if (token !== noteOpenToken) return; // a newer open request won
+    const ann = (pageData.annotations || []).find(a => a.id === id);
+    const existingComment = (ann && ann.comment) || '';
+    const target = markEl.isConnected ? markEl : marksFor(id)[0];
+    if (!target) return;
 
     const popover = document.createElement('div');
     popover.className = 'wa-mark-popover';
@@ -398,35 +574,27 @@
     const textarea = popover.querySelector('.wa-mp-textarea');
     textarea.value = existingComment;
 
-    positionAbove(popover, rect);
+    positionAbove(popover, target.getBoundingClientRect());
 
-    popover.querySelector('.wa-mp-save').addEventListener('click', () => closeMarkPopover(true));
-    popover.querySelector('.wa-mp-cancel').addEventListener('click', () => closeMarkPopover(false));
+    popover.querySelector('.wa-mp-save').addEventListener('click', (e) => { if (e.isTrusted) closeMarkPopover(true); });
+    popover.querySelector('.wa-mp-cancel').addEventListener('click', (e) => { if (e.isTrusted) closeMarkPopover(false); });
 
     textarea.addEventListener('keydown', (e) => {
       if (e.isComposing) return;
-      if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); closeMarkPopover(true); }
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); closeMarkPopover(true); }
       if (e.key === 'Escape') closeMarkPopover(false);
     });
 
     activeMarkPopover = popover;
-    activeMarkEl = markEl;
+    activeMarkId = id;
+    activeMarkOriginal = existingComment;
     textarea.focus();
   }
-
-  document.addEventListener('mousedown', (e) => {
-    if (
-      activeMarkPopover &&
-      !activeMarkPopover.contains(e.target) &&
-      !e.target.closest('.wa-hover-toolbar')
-    ) {
-      closeMarkPopover(true);
-    }
-  });
 
   // ── Review Panel ──────────────────────────────────────────────────────────
 
   let reviewPanel = null;
+  let panelOpening = false;
   let panelTab = null;
   let panelDeselected = new Set(); // ids excluded from export; default = everything selected
 
@@ -476,8 +644,7 @@
   function bindPanelItems(rootEl) {
     rootEl.querySelectorAll('.wa-panel-item').forEach(item => {
       item.addEventListener('click', () => {
-        const id = item.dataset.id;
-        const mark = document.querySelector(`.wa-highlight[data-annotation-id="${CSS.escape(id)}"]`);
+        const mark = marksFor(item.dataset.id)[0];
         if (!mark) return;
         mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
         mark.classList.add('wa-highlight-flash');
@@ -497,14 +664,17 @@
 
   function closeReviewPanel() {
     if (!reviewPanel) return;
-    reviewPanel.classList.remove('wa-panel-open');
-    setTimeout(() => { if (reviewPanel) { reviewPanel.remove(); reviewPanel = null; } }, 240);
+    const panel = reviewPanel;
+    reviewPanel = null;
+    panel.classList.remove('wa-panel-open');
+    setTimeout(() => panel.remove(), 240);
     if (panelTab) panelTab.classList.remove('wa-panel-tab-active');
   }
 
   async function refreshReviewPanel() {
     if (!reviewPanel) return;
     const pageData = await getPageData();
+    if (!reviewPanel) return;
     const annotations = (pageData.annotations || []).slice().sort((a, b) => a.createdAt - b.createdAt);
 
     const count = reviewPanel.querySelector('.wa-panel-count');
@@ -524,8 +694,22 @@
     updatePanelExportUI();
   }
 
+  async function copyToClipboard(text, btn, label) {
+    try {
+      await navigator.clipboard.writeText(text);
+      btn.textContent = 'Copied!';
+      setTimeout(() => { btn.textContent = label; }, 2000);
+    } catch {
+      showToast("Couldn't copy to the clipboard. Click the page once, then try again.");
+    }
+  }
+
   async function openReviewPanel() {
+    if (!siteEnabled || reviewPanel || panelOpening) return;
+    panelOpening = true;
     const pageData = await getPageData();
+    panelOpening = false;
+    if (!siteEnabled || reviewPanel) return;
     const annotations = (pageData.annotations || []).slice().sort((a, b) => a.createdAt - b.createdAt);
 
     const panel = document.createElement('div');
@@ -574,7 +758,8 @@
     });
 
     // Copy for LLM
-    panel.querySelector('.wa-panel-copy-llm').addEventListener('click', async () => {
+    panel.querySelector('.wa-panel-copy-llm').addEventListener('click', async (e) => {
+      if (!e.isTrusted) return;
       const pd = await getPageData();
       const sorted = (pd.annotations || []).slice()
         .filter(ann => !panelDeselected.has(ann.id))
@@ -590,14 +775,12 @@
         lines.push('---', '', '> ' + ann.text, '');
         if (ann.comment && ann.comment.trim()) lines.push(ann.comment, '');
       }
-      await navigator.clipboard.writeText(lines.join('\n'));
-      const btn = panel.querySelector('.wa-panel-copy-llm');
-      btn.textContent = 'Copied!';
-      setTimeout(() => { btn.textContent = 'Copy for LLM'; }, 2000);
+      await copyToClipboard(lines.join('\n'), panel.querySelector('.wa-panel-copy-llm'), 'Copy for LLM');
     });
 
     // Copy as Notes
-    panel.querySelector('.wa-panel-copy-notes').addEventListener('click', async () => {
+    panel.querySelector('.wa-panel-copy-notes').addEventListener('click', async (e) => {
+      if (!e.isTrusted) return;
       const pd = await getPageData();
       const sorted = (pd.annotations || []).slice()
         .filter(ann => !panelDeselected.has(ann.id))
@@ -612,29 +795,21 @@
         lines.push('- ' + ann.text);
         if (ann.comment && ann.comment.trim()) lines.push('  - ' + ann.comment);
       }
-      await navigator.clipboard.writeText(lines.join('\n'));
-      const btn = panel.querySelector('.wa-panel-copy-notes');
-      btn.textContent = 'Copied!';
-      setTimeout(() => { btn.textContent = 'Copy as Notes'; }, 2000);
+      await copyToClipboard(lines.join('\n'), panel.querySelector('.wa-panel-copy-notes'), 'Copy as Notes');
     });
 
     // Clear All
-    panel.querySelector('.wa-panel-clear').addEventListener('click', async () => {
+    panel.querySelector('.wa-panel-clear').addEventListener('click', async (e) => {
+      if (!e.isTrusted) return;
       if (!confirm('Remove all annotations for this page? This will also clear all highlights.')) return;
-      if (isContextValid()) {
-        try { await chrome.storage.local.remove(PAGE_URL); } catch { }
-      }
-      document.querySelectorAll('.wa-highlight').forEach(mark => {
-        const parent = mark.parentNode;
-        while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
-        mark.remove();
-      });
+      if (!(await clearPageData())) return;
       closeMarkPopover(false);
       removeHoverToolbar();
+      unwrapAll();
       refreshReviewPanel();
     });
 
-    document.body.appendChild(panel);
+    ui().appendChild(panel);
     reviewPanel = panel;
     updatePanelExportUI();
     requestAnimationFrame(() => panel.classList.add('wa-panel-open'));
@@ -642,12 +817,13 @@
   }
 
   function toggleReviewPanel() {
+    if (!siteEnabled) return;
     if (reviewPanel) { closeReviewPanel(); } else { openReviewPanel(); }
   }
 
-  // Inject persistent toggle tab on the right edge of the page
+  // Persistent toggle tab on the right edge of the page
   function initPanelTab() {
-    if (panelTab) return;
+    if (!siteEnabled || panelTab) return;
     panelTab = document.createElement('button');
     panelTab.className = 'wa-panel-tab';
     panelTab.title = 'Toggle Highlights Panel';
@@ -656,56 +832,79 @@
         <path d="M18.85 1.1L22.9 5.15a.5.5 0 010 .7L11.16 17.6l-4.95.55a1 1 0 01-1.1-1.1l.55-4.95L17.15 1.1a.5.5 0 01.7 0zM3 21h18v2H3v-2z"/>
       </svg>
     `;
-    panelTab.addEventListener('click', toggleReviewPanel);
-    document.body.appendChild(panelTab);
+    panelTab.addEventListener('click', (e) => { if (e.isTrusted) toggleReviewPanel(); });
+    ui().appendChild(panelTab);
   }
 
-  // ── Load site toggle state ────────────────────────────────────────────────
+  // ── Per-site on/off ───────────────────────────────────────────────────────
+  // Driven by storage, so turning a site off applies to every open tab on that site.
 
-  (async function loadSiteToggle() {
-    if (!isContextValid()) return;
+  function applySiteEnabled(enabled) {
+    if (enabled === siteEnabled) return;
+    siteEnabled = enabled;
+    if (enabled) {
+      initPanelTab();
+      restoreHighlights();
+    } else {
+      removeSelPopover();
+      removeHoverToolbar();
+      closeMarkPopover(false);
+      closeReviewPanel();
+      if (panelTab) { panelTab.remove(); panelTab = null; }
+      unwrapAll(); // leave the page exactly as the site served it
+      detachUi();
+    }
+  }
+
+  async function readSiteEnabled() {
+    if (!isContextValid()) return false;
     try {
       const result = await chrome.storage.local.get('wa_disabled_sites');
-      const disabled = result.wa_disabled_sites || [];
-      if (disabled.includes(PAGE_HOST)) {
-        siteEnabled = false;
-      }
-    } catch {}
-    if (siteEnabled) initPanelTab();
-  })();
+      return !(result.wa_disabled_sites || []).includes(PAGE_HOST);
+    } catch { return false; }
+  }
+
+  let siteStateKnown = false;
+
+  if (isContextValid()) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local' || !('wa_disabled_sites' in changes)) return;
+      siteStateKnown = true;
+      applySiteEnabled(!(changes.wa_disabled_sites.newValue || []).includes(PAGE_HOST));
+    });
+  }
 
   // ── Restore highlights on page load ─────────────────────────────────────
 
   async function restoreHighlights() {
-    if (!isContextValid()) return;
+    if (!siteEnabled || !isContextValid()) return;
 
-    // Re-inject panel tab if it was removed by SPA hydration
-    if (!document.body.contains(panelTab)) {
-      panelTab = null;
-      initPanelTab();
-    }
+    // Put our UI back if the page removed it (SPA re-renders can do that)
+    if (uiHost && !uiHost.isConnected) document.documentElement.appendChild(uiHost);
+    initPanelTab();
 
     try {
       const pageData = await getPageData();
-      const annotations = pageData.annotations || [];
-      if (annotations.length === 0) return;
-
-      for (const ann of annotations) {
-        if (document.querySelector(`.wa-highlight[data-annotation-id="${CSS.escape(ann.id)}"]`)) continue;
-        findAndHighlightText(ann.text, ann.id, ann.comment);
+      if (!siteEnabled) return; // turned off while we were reading
+      for (const ann of pageData.annotations || []) {
+        if (marksFor(ann.id).length) continue;
+        findAndHighlightText(ann.text, ann.id, !!(ann.comment && ann.comment.trim()));
       }
     } catch { }
   }
 
-  function findAndHighlightText(searchText, id, comment) {
-    if (!searchText || !searchText.trim()) return false;
+  function findAndHighlightText(searchText, id, hasComment) {
+    if (!searchText || !searchText.trim() || !document.body) return false;
 
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode: (node) => (isHighlightableTextNode(node) && !node.parentElement.closest('.wa-highlight'))
+        ? NodeFilter.FILTER_ACCEPT
+        : NodeFilter.FILTER_REJECT,
+    });
     const textNodes = [];
     let node;
 
     while ((node = walker.nextNode())) {
-      if (node.parentElement?.closest('.wa-sel-popover, .wa-mark-popover, .wa-hover-toolbar, .wa-panel, .wa-panel-tab, .wa-highlight')) continue;
       textNodes.push(node);
     }
 
@@ -717,14 +916,8 @@
         range.setStart(tn, idx);
         range.setEnd(tn, idx + searchText.length);
 
-        const mark = document.createElement('mark');
-        mark.className = 'wa-highlight';
-        mark.dataset.annotationId = id;
-        mark.dataset.comment = comment || '';
-        if (comment && comment.trim()) mark.classList.add('has-comment');
-
         try {
-          range.surroundContents(mark);
+          range.surroundContents(makeMark(id, hasComment));
           return true;
         } catch { }
       }
@@ -752,11 +945,7 @@
       const localEnd = Math.min(tn.textContent.length, matchEnd - ns);
       if (localStart >= localEnd) continue;
 
-      const mark = document.createElement('mark');
-      mark.className = 'wa-highlight';
-      mark.dataset.annotationId = id;
-      mark.dataset.comment = comment || '';
-      if (comment && comment.trim()) mark.classList.add('has-comment');
+      const mark = makeMark(id, hasComment);
       mark.textContent = tn.textContent.slice(localStart, localEnd);
 
       const frag = document.createDocumentFragment();
@@ -770,15 +959,18 @@
     return true;
   }
 
-  // Restore with retries — SPA frameworks (React, Vue, etc.) hydrate the DOM
-  // after initial load, which destroys our <mark> elements. Retrying after
-  // increasing delays ensures we restore after hydration finishes.
-  (function scheduleRestore() {
-    const delays = [0, 800, 2000, 4000];
-    for (const delay of delays) {
+  // Read the per-site setting first; nothing is injected into the page until we know the site
+  // is enabled. Then retry restore a few times — SPA frameworks (React, Vue, etc.) hydrate the
+  // DOM after load, which destroys our <mark> elements.
+  readSiteEnabled().then((enabled) => {
+    if (!siteStateKnown) {
+      siteStateKnown = true;
+      applySiteEnabled(enabled); // restores immediately when enabled
+    }
+    for (const delay of [800, 2000, 4000]) {
       setTimeout(restoreHighlights, delay);
     }
-  })();
+  });
 
   // ── Message listener (from popup) ────────────────────────────────────────
 
@@ -788,27 +980,9 @@
         closeMarkPopover(false);
         removeHoverToolbar();
         closeReviewPanel();
-        document.querySelectorAll('.wa-highlight').forEach(mark => {
-          const parent = mark.parentNode;
-          while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
-          mark.remove();
-        });
-        if (panelTab) panelTab.remove(), panelTab = null;
-        setTimeout(initPanelTab, 50);
+        unwrapAll();
       }
       if (msg.type === 'WA_TOGGLE_PANEL') toggleReviewPanel();
-      if (msg.type === 'WA_TOGGLE_SITE') {
-        siteEnabled = msg.enabled !== undefined ? msg.enabled : !siteEnabled;
-        if (!siteEnabled) {
-          removeSelPopover();
-          removeHoverToolbar();
-          closeMarkPopover(false);
-          closeReviewPanel();
-          if (panelTab) { panelTab.remove(); panelTab = null; }
-        } else {
-          initPanelTab();
-        }
-      }
     });
   }
 

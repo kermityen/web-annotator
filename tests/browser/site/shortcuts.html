@@ -1,0 +1,18 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Test Article</title>
+<style>body{font:16px/1.6 sans-serif;margin:40px;max-width:700px}</style>
+</head><body>
+<style>/* zebra-marker */ .x{color:red}</style>
+<textarea id="ta" rows="2">zebra-marker default text</textarea>
+<h1>Test Article</h1>
+<p id="p1">The quick brown fox jumps over the lazy dog near the riverbank.</p>
+<p id="p2">Repeated phrase appears here. Some filler text follows.</p>
+<p id="p3">Repeated phrase appears here too, in the third paragraph.</p>
+<p id="p4">A zebra-marker lives in this paragraph for restore testing.</p>
+<div id="editor" contenteditable="true">Editable draft text that the user is writing.</div>
+<p id="p5">Second sentence for a second highlight lives here.</p>
+<script>
+window.__keys = '';
+document.addEventListener('keydown', (e) => { window.__keys += e.key; });
+</script>
+</body></html>

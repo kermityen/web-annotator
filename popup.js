@@ -189,7 +189,11 @@ async function init() {
   const toggleData = await chrome.storage.local.get('wa_disabled_sites');
   const disabledSites = toggleData.wa_disabled_sites || [];
   siteToggle.checked = !disabledSites.includes(hostname);
+  const panelBtn = document.getElementById('panel-btn');
+  panelBtn.disabled = !siteToggle.checked;
 
+  // Open tabs pick the change up through chrome.storage.onChanged, so every tab on this site
+  // switches together.
   siteToggle.addEventListener('change', async () => {
     const data = await chrome.storage.local.get('wa_disabled_sites');
     const sites = data.wa_disabled_sites || [];
@@ -200,7 +204,7 @@ async function init() {
       if (!sites.includes(hostname)) sites.push(hostname);
       await chrome.storage.local.set({ wa_disabled_sites: sites });
     }
-    try { await chrome.tabs.sendMessage(tab.id, { type: 'WA_TOGGLE_SITE', enabled: siteToggle.checked }); } catch {}
+    panelBtn.disabled = !siteToggle.checked;
   });
 
   const result = await chrome.storage.local.get(url);
@@ -299,7 +303,7 @@ async function init() {
   });
 
   // Toggle Review Panel
-  document.getElementById('panel-btn').addEventListener('click', async () => {
+  panelBtn.addEventListener('click', async () => {
     try { await chrome.tabs.sendMessage(tab.id, { type: 'WA_TOGGLE_PANEL' }); } catch { }
     window.close();
   });
