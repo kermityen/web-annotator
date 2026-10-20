@@ -13,8 +13,9 @@ FEATURES
 - Add notes to your highlights
 - Review all highlights in a side panel that opens on the page
 - Pick exactly which highlights to export — everything is selected by default, untick what you don't need
-- Copy for LLM — formatted markdown with source context, ready to paste into any AI assistant
-- Copy as Notes — clean list format, ready to paste into any note-taking app
+- Copy for LLM — markdown with your quotes, your notes clearly labelled, and the source link, in the order they appear on the page
+- Copy as Notes — a bullet list that pastes cleanly into Notion, Obsidian, or Apple Notes
+- Copied links drop common tracking and login parameters (such as utm_ tags and access tokens)
 - Per-site toggle — turn the extension off on sites where you don't want it
 - Highlights restore automatically when you revisit the page
 - Works on JavaScript-rendered sites (React, Vue, Next.js) — highlights are restored after the page finishes rendering
@@ -33,7 +34,7 @@ PERMISSIONS
 
 - storage — saves your highlights and notes locally in your browser
 - activeTab and tabs — reads the address of the current tab so highlights can be matched back to the right page
-- Access to all websites — the extension runs on whatever page you choose to highlight. It only reads the text you select, and nothing ever leaves your browser
+- Access to all websites — the extension needs to run on any page you might want to highlight. It reads the page only to show and restore your highlights, and nothing ever leaves your browser
 
 TIPS
 

@@ -148,12 +148,9 @@ async function articleWith(highlights) {
   return tab;
 }
 
-const markdownFor = (anns) => [
-  '# Page Notes', '',
-  `**Source:** [Why your sourdough starter needs a schedule](${KEY})`,
-  `**Annotated:** ${new Date().toISOString().slice(0, 10)}`, '',
-  ...anns.flatMap(a => ['---', '', '> ' + a.text, '', ...(a.comment ? [a.comment, ''] : [])]),
-].join('\n');
+// The card shows exactly what "Copy for LLM" produces, built by the extension's own formatter.
+const WA_EXPORT = new Function(readFileSync(join(EXT, 'export-format.js'), 'utf8') + '; return WA_EXPORT;')();
+const markdownFor = (anns) => WA_EXPORT.forLlm({ url: KEY, title: 'Why your sourdough starter needs a schedule' }, anns);
 
 // ── composite: caption + generic browser frame + raw capture (+ optional overlay) ─
 function composite(name, title, sub, rawFile, overlay = '') {

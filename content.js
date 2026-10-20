@@ -200,6 +200,15 @@
     document.querySelectorAll('.wa-highlight').forEach(unwrapMark);
   }
 
+  // Annotation ids in the order their highlights appear on the page.
+  function idsInPageOrder() {
+    return [...new Set([...document.querySelectorAll('.wa-highlight')].map(m => m.dataset.annotationId))];
+  }
+
+  function inPageOrder(annotations) {
+    return WA_EXPORT.orderBy(annotations || [], idsInPageOrder()); // defined in export-format.js
+  }
+
   // ── UI host (closed shadow root) ──────────────────────────────────────────
 
   let uiHost = null;
@@ -675,7 +684,7 @@
     if (!reviewPanel) return;
     const pageData = await getPageData();
     if (!reviewPanel) return;
-    const annotations = (pageData.annotations || []).slice().sort((a, b) => a.createdAt - b.createdAt);
+    const annotations = inPageOrder(pageData.annotations);
 
     const count = reviewPanel.querySelector('.wa-panel-count');
     if (count) count.textContent = annotations.length;
@@ -694,9 +703,16 @@
     updatePanelExportUI();
   }
 
-  async function copyToClipboard(text, btn, label) {
+  async function copyToClipboard(text, btn, label, html) {
     try {
-      await navigator.clipboard.writeText(text);
+      if (html) {
+        await navigator.clipboard.write([new ClipboardItem({
+          'text/plain': new Blob([text], { type: 'text/plain' }),
+          'text/html': new Blob([html], { type: 'text/html' }),
+        })]);
+      } else {
+        await navigator.clipboard.writeText(text);
+      }
       btn.textContent = 'Copied!';
       setTimeout(() => { btn.textContent = label; }, 2000);
     } catch {
@@ -710,7 +726,7 @@
     const pageData = await getPageData();
     panelOpening = false;
     if (!siteEnabled || reviewPanel) return;
-    const annotations = (pageData.annotations || []).slice().sort((a, b) => a.createdAt - b.createdAt);
+    const annotations = inPageOrder(pageData.annotations);
 
     const panel = document.createElement('div');
     panel.className = 'wa-panel';
@@ -761,41 +777,19 @@
     panel.querySelector('.wa-panel-copy-llm').addEventListener('click', async (e) => {
       if (!e.isTrusted) return;
       const pd = await getPageData();
-      const sorted = (pd.annotations || []).slice()
-        .filter(ann => !panelDeselected.has(ann.id))
-        .sort((a, b) => a.createdAt - b.createdAt);
-      if (sorted.length === 0) return;
-      const date = new Date().toISOString().slice(0, 10);
-      const lines = [
-        '# Page Notes', '',
-        `**Source:** [${pd.title}](${pd.url})`,
-        `**Annotated:** ${date}`, '',
-      ];
-      for (const ann of sorted) {
-        lines.push('---', '', '> ' + ann.text, '');
-        if (ann.comment && ann.comment.trim()) lines.push(ann.comment, '');
-      }
-      await copyToClipboard(lines.join('\n'), panel.querySelector('.wa-panel-copy-llm'), 'Copy for LLM');
+      const selected = inPageOrder(pd.annotations).filter(ann => !panelDeselected.has(ann.id));
+      if (selected.length === 0) return;
+      await copyToClipboard(WA_EXPORT.forLlm(pd, selected), panel.querySelector('.wa-panel-copy-llm'), 'Copy for LLM');
     });
 
     // Copy as Notes
     panel.querySelector('.wa-panel-copy-notes').addEventListener('click', async (e) => {
       if (!e.isTrusted) return;
       const pd = await getPageData();
-      const sorted = (pd.annotations || []).slice()
-        .filter(ann => !panelDeselected.has(ann.id))
-        .sort((a, b) => a.createdAt - b.createdAt);
-      if (sorted.length === 0) return;
-      const lines = [
-        `# ${pd.title}`,
-        `${pd.url}`,
-        '',
-      ];
-      for (const ann of sorted) {
-        lines.push('- ' + ann.text);
-        if (ann.comment && ann.comment.trim()) lines.push('  - ' + ann.comment);
-      }
-      await copyToClipboard(lines.join('\n'), panel.querySelector('.wa-panel-copy-notes'), 'Copy as Notes');
+      const selected = inPageOrder(pd.annotations).filter(ann => !panelDeselected.has(ann.id));
+      if (selected.length === 0) return;
+      const { text, html } = WA_EXPORT.forNotes(pd, selected);
+      await copyToClipboard(text, panel.querySelector('.wa-panel-copy-notes'), 'Copy as Notes', html);
     });
 
     // Clear All
@@ -975,7 +969,8 @@
   // ── Message listener (from popup) ────────────────────────────────────────
 
   if (isContextValid()) {
-    chrome.runtime.onMessage.addListener((msg) => {
+    chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (msg.type === 'WA_GET_PAGE_ORDER') { sendResponse(idsInPageOrder()); return; }
       if (msg.type === 'WA_CLEAR_ALL') {
         closeMarkPopover(false);
         removeHoverToolbar();

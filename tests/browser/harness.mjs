@@ -15,9 +15,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const CHROME = process.env.CHROME || '/Users/kermityen/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing';
 const EXT = resolve(process.argv[2] || '');
 const FILTER = process.argv[3] || '';
-const PORT = 8765;
-const SECURE = `http://127.0.0.1:${PORT}`;      // 127.0.0.1 is a secure context
-const INSECURE = `http://insecure.test:${PORT}`; // mapped to 127.0.0.1, NOT a secure context
+let SECURE, INSECURE; // set once the server has picked a free port
 const PAGE = '/article.html';
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -34,7 +32,10 @@ const server = http.createServer((req, res) => {
     res.end(body);
   } catch { res.writeHead(404); res.end('not found'); }
 });
-await new Promise(r => server.listen(PORT, '127.0.0.1', r));
+await new Promise(r => server.listen(0, '127.0.0.1', r)); // any free port
+const PORT = server.address().port;
+SECURE = `http://127.0.0.1:${PORT}`;      // 127.0.0.1 is a secure context
+INSECURE = `http://insecure.test:${PORT}`; // mapped to 127.0.0.1, NOT a secure context
 
 // ── launch chrome ───────────────────────────────────────────────────────────
 const profile = mkdtempSync(join(tmpdir(), 'wa-profile-'));
@@ -257,6 +258,16 @@ class Page {
   }
 
   async type(text) { await this.send('Input.insertText', { text }); }
+  // Wait until the note editor (inside the closed shadow root) actually has focus.
+  async waitNoteFocused(timeout = 3000) {
+    return this.waitFor(async () => {
+      const ta = (await this.byClass('wa-mp-textarea'))[0];
+      if (!ta) return false;
+      const { object } = await this.send('DOM.resolveNode', { nodeId: ta.nodeId });
+      const r = await this.send('Runtime.callFunctionOn', { objectId: object.objectId, functionDeclaration: 'function(){ return this.getRootNode().activeElement === this }', returnByValue: true });
+      return r.result.value === true;
+    }, timeout);
+  }
   async typeKeys(text) { // real key events, one per character
     for (const ch of text) {
       const up = ch.toUpperCase();
@@ -287,6 +298,21 @@ class Page {
     while (Date.now() < end) { if (await fn()) return true; await sleep(100); }
     return false;
   }
+}
+
+async function copyFromPanel(p, origin, buttonClass) {
+  await cdp.send('Browser.grantPermissions', { origin, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+  if (!(await p.byClass('wa-panel')).length) { await p.clickClass('wa-panel-tab'); await sleep(600); }
+  await p.clickClass(buttonClass);
+  await sleep(400);
+  try {
+    return await p.evalMain(`(async () => {
+      const [item] = await navigator.clipboard.read();
+      const text = item.types.includes('text/plain') ? await (await item.getType('text/plain')).text() : '';
+      const html = item.types.includes('text/html') ? await (await item.getType('text/html')).text() : '';
+      return { text, html, types: item.types };
+    })()`);
+  } catch (e) { return { text: 'ERR ' + e.message, html: '', types: [] }; }
 }
 
 const ann = (id, text, comment = '') => ({ id, text, comment, createdAt: Date.now(), startOffset: 0, endOffset: 0, parentSelector: 'p' });
@@ -338,7 +364,7 @@ const tests = {
     await p.fresh(SECURE + PAGE);
     await p.selectPhrase('#p1', 'quick brown fox');
     await p.clickClass('wa-sel-note-btn');
-    await p.waitFor(async () => (await p.byClass('wa-mp-textarea')).length === 1, 2000);
+    await p.waitNoteFocused();
     await p.type(SECRET);
     const whileTyping = await p.evalMain(leak);
     await p.clickClass('wa-mp-save');
@@ -410,7 +436,7 @@ const tests = {
     await p.fresh(SECURE + PAGE);
     await p.selectPhrase('#p1', 'quick brown fox');
     await p.clickClass('wa-sel-note-btn');
-    await p.waitFor(async () => (await p.byClass('wa-mp-textarea')).length === 1, 2000);
+    await p.waitNoteFocused();
     await p.type('ctrl-enter-note');
     await p.key('Enter', 2); // Ctrl
     await sleep(500);
@@ -457,17 +483,65 @@ const tests = {
 
   async T11_copy_for_llm(p) {
     await p.fresh(SECURE + PAGE);
-    await cdp.send('Browser.grantPermissions', { origin: SECURE, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
     await p.seed(SECURE, [ann('seed-1', 'quick brown fox', 'my note')]);
     await p.goto(SECURE + PAGE);
     await p.waitFor(async () => (await p.markCount()) === 1);
-    await p.clickClass('wa-panel-tab');
-    await sleep(600);
-    await p.clickClass('wa-panel-copy-llm');
-    await sleep(400);
-    let clip = '';
-    try { clip = await p.evalMain(`navigator.clipboard.readText()`); } catch (e) { clip = 'ERR ' + e.message; }
-    check('T11 Copy for LLM 內容正確', clip.includes('> quick brown fox') && clip.includes('my note'), JSON.stringify(clip.slice(0, 160)));
+    const { text } = await copyFromPanel(p, SECURE, 'wa-panel-copy-llm');
+    const ok = text.startsWith('# Highlights from "Test Article"') && text.includes('\nSource: ' + SECURE + PAGE + '\n')
+      && text.includes('\n> quick brown fox\n') && text.includes('\nMy note: my note\n');
+    check('T11 Copy for LLM 內容正確（新格式）', ok, JSON.stringify(text.slice(0, 200)));
+  },
+
+  async T17_copy_follows_page_order(p) {
+    await p.fresh(SECURE + PAGE);
+    const t = Date.now();
+    // created newest-first, so time order is the reverse of page order
+    await p.seed(SECURE, [
+      { ...ann('p5', 'Second sentence'), createdAt: t - 1000 },
+      { ...ann('p3', 'Repeated phrase appears here too'), createdAt: t - 2000 },
+      { ...ann('p1', 'quick brown fox'), createdAt: t - 3000 },
+    ].reverse());
+    await p.goto(SECURE + PAGE);
+    await p.waitFor(async () => (await p.markCount()) === 3);
+    const { text } = await copyFromPanel(p, SECURE, 'wa-panel-copy-llm');
+    const pos = ['quick brown fox', 'Repeated phrase appears here too', 'Second sentence'].map(q => text.indexOf('> ' + q));
+    const panelOrder = await Promise.all((await p.byClass('wa-panel-quote')).map(async n => (n.children || []).map(c => c.nodeValue).join('')));
+    const ok = pos.every(i => i > 0) && pos[0] < pos[1] && pos[1] < pos[2] && panelOrder[0].includes('quick') && panelOrder[2].includes('Second');
+    check('T17 複製和側欄都照文章順序，不照標記時間', ok, `positionsInCopy=${JSON.stringify(pos)} panel=${JSON.stringify(panelOrder)}`);
+  },
+
+  async T18_multiline_quotes_and_notes(p) {
+    await p.fresh(SECURE + PAGE);
+    await p.seed(SECURE, [ann('m1', 'quick brown fox', 'note line one\nnote line two'), ann('m2', 'first paragraph\n\nsecond paragraph')]);
+    await p.goto(SECURE + PAGE);
+    await p.waitFor(async () => (await p.markCount()) === 1);
+    const llm = (await copyFromPanel(p, SECURE, 'wa-panel-copy-llm')).text;
+    const notes = (await copyFromPanel(p, SECURE, 'wa-panel-copy-notes')).text;
+    const ok = llm.includes('\n> first paragraph\n>\n> second paragraph\n') && llm.includes('\nMy note: note line one\nnote line two\n')
+      && notes.includes('\n- quick brown fox\n  - note line one\n    note line two\n') && notes.includes('\n- first paragraph\n\n  second paragraph');
+    check('T18 跨段落引文、多行筆記格式不跑掉', ok, `llm=${JSON.stringify(llm.slice(80))} notes=${JSON.stringify(notes)}`);
+  },
+
+  async T19_copied_link_drops_tokens(p) {
+    const PATH = '/article.html?id=7&access_token=SECRET123&utm_source=newsletter';
+    await p.fresh(SECURE + PATH);
+    await p.seed(SECURE, [ann('u1', 'quick brown fox')], PATH);
+    await p.goto(SECURE + PATH);
+    await p.waitFor(async () => (await p.markCount()) === 1);
+    const { text } = await copyFromPanel(p, SECURE, 'wa-panel-copy-llm');
+    const ok = text.includes('Source: ' + SECURE + '/article.html?id=7\n') && !text.includes('SECRET123') && !text.includes('utm_');
+    check('T19 複製的網址自動拿掉 token 和追蹤參數', ok, JSON.stringify(text.split('\n').find(l => l.startsWith('Source')) || text.slice(0, 120)));
+  },
+
+  async T20_copy_as_notes_has_rich_text(p) {
+    await p.fresh(SECURE + PAGE);
+    await p.seed(SECURE, [ann('r1', 'quick brown fox', 'a note')]);
+    await p.goto(SECURE + PAGE);
+    await p.waitFor(async () => (await p.markCount()) === 1);
+    const { text, html, types } = await copyFromPanel(p, SECURE, 'wa-panel-copy-notes');
+    const ok = types.includes('text/html') && types.includes('text/plain') && /<li>quick brown fox<ul><li>a note<\/li><\/ul><\/li>/.test(html)
+      && text.includes('\n- quick brown fox\n  - a note\n');
+    check('T20 Copy as Notes 同時給純文字和格式化文字', ok, `types=${JSON.stringify(types)} html=${JSON.stringify(html.slice(0, 160))}`);
   },
 
   async T12_ui_renders_on_strict_csp_page(p) {
@@ -489,7 +563,7 @@ const tests = {
     await p.fresh(SECURE + PATH);
     await p.selectPhrase('#p1', 'quick brown fox');
     await p.clickClass('wa-sel-note-btn');
-    await p.waitFor(async () => (await p.byClass('wa-mp-textarea')).length === 1, 2000);
+    await p.waitNoteFocused();
     await p.evalMain(`window.__keys = ''`);
     await p.typeKeys('kjl');
     const pageSaw = await p.evalMain('window.__keys');
@@ -516,7 +590,8 @@ const tests = {
 
   async T15_popup_toggle_panel_button_and_clear(p) {
     await p.fresh(SECURE + PAGE);
-    await p.seed(SECURE, [ann('seed-1', 'quick brown fox'), ann('seed-2', 'Second sentence', 'n')]);
+    // seeded newest-first, so the popup must reorder them to match the page
+    await p.seed(SECURE, [{ ...ann('seed-2', 'Second sentence', 'n'), createdAt: 1 }, { ...ann('seed-1', 'quick brown fox'), createdAt: 2 }]);
     await p.goto(SECURE + PAGE);
     await p.waitFor(async () => (await p.markCount()) === 2);
     const extOrigin = String((await p.waitIsolated()).origin);
@@ -532,6 +607,7 @@ const tests = {
     const sees = await pop(`document.getElementById('page-url').textContent`);
     const count = await pop(`document.getElementById('count-all').textContent`);
     const btnBefore = await pop(`document.getElementById('panel-btn').disabled`);
+    const popupOrder = await pop(`[...document.querySelectorAll('.annotation-text')].map(e => e.textContent)`);
 
     await pop(`document.getElementById('site-toggle').click(), true`);
     const offOk = await p.waitFor(async () => (await p.markCount()) === 0 && (await p.byClass('wa-panel-tab')).length === 0, 3000);
@@ -547,8 +623,8 @@ const tests = {
     off();
     await cdp.send('Target.closeTarget', { targetId }).catch(() => {});
     check('T15 popup：開關同步到頁面、Panel 按鈕跟著停用、Clear All 有效',
-      sees === SECURE + PAGE && count === '2' && btnBefore === false && offOk && btnOff === true && onOk && btnOn === false && cleared && rec === null && errs.length === 0,
-      `popupSees=${sees} count=${count} panelBtnDisabled(before/off/on)=${btnBefore}/${btnOff}/${btnOn} pageOff=${offOk} pageOn=${onOk} cleared=${cleared} recordLeft=${!!rec} popupErrors=${JSON.stringify(errs)}`);
+      sees === SECURE + PAGE && count === '2' && popupOrder[0].includes('quick') && popupOrder[1].includes('Second') && btnBefore === false && offOk && btnOff === true && onOk && btnOn === false && cleared && rec === null && errs.length === 0,
+      `popupSees=${sees} count=${count} popupOrder=${JSON.stringify(popupOrder)} panelBtnDisabled(before/off/on)=${btnBefore}/${btnOff}/${btnOn} pageOff=${offOk} pageOn=${onOk} cleared=${cleared} recordLeft=${!!rec} popupErrors=${JSON.stringify(errs)}`);
   },
 
   async T16_svg_file_opened_in_a_tab(p) {

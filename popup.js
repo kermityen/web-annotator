@@ -40,48 +40,22 @@ function formatBytes(bytes) {
   return mb.toFixed(2) + ' MB';
 }
 
-function buildLlmMarkdown(pageData, annotationsList) {
-  const date = new Date().toISOString().slice(0, 10);
-  const lines = [
-    '# Page Notes',
-    '',
-    `**Source:** [${pageData.title}](${pageData.url})`,
-    `**Annotated:** ${date}`,
-    '',
-  ];
+// Copy text is built by export-format.js (WA_EXPORT), shared with the in-page panel.
 
-  const sorted = [...annotationsList].sort((a, b) => a.createdAt - b.createdAt);
-
-  for (const ann of sorted) {
-    lines.push('---', '');
-    lines.push('> ' + ann.text, '');
-    if (ann.comment && ann.comment.trim()) {
-      lines.push(ann.comment, '');
-    }
-  }
-
-  return lines.join('\n');
+async function writeClipboard(text, html) {
+  if (!html) return navigator.clipboard.writeText(text);
+  return navigator.clipboard.write([new ClipboardItem({
+    'text/plain': new Blob([text], { type: 'text/plain' }),
+    'text/html': new Blob([html], { type: 'text/html' }),
+  })]);
 }
 
-function buildNotesMarkdown(pageData, annotationsList) {
-  const lines = [
-    `# ${pageData.title}`,
-    `${pageData.url}`,
-    '',
-  ];
-
-  const sorted = [...annotationsList].sort((a, b) => a.createdAt - b.createdAt);
-
-  for (const ann of sorted) {
-    lines.push('- ' + ann.text);
-    if (ann.comment && ann.comment.trim()) {
-      lines.push('  - ' + ann.comment);
-    }
-  }
-
-  return lines.join('\n');
+// Highlight ids in the order they appear on the page, asked of the page itself. Empty when
+// the page has no content script (restricted page, or the site is switched off).
+async function pageOrder(tabId) {
+  try { return (await chrome.tabs.sendMessage(tabId, { type: 'WA_GET_PAGE_ORDER' })) || []; }
+  catch { return []; }
 }
-
 
 function renderList(annotations, container, selectedIds, onToggle) {
   container.innerHTML = '';
@@ -216,7 +190,7 @@ async function init() {
   const list = document.getElementById('annotation-list');
   const footer = document.getElementById('footer');
 
-  const sorted = pageData ? [...pageData.annotations].sort((a, b) => a.createdAt - b.createdAt) : [];
+  const sorted = pageData ? WA_EXPORT.orderBy(pageData.annotations, await pageOrder(tab.id)) : [];
   const withNotes = sorted.filter(a => a.comment && a.comment.trim());
 
   document.getElementById('count-all').textContent = sorted.length;
@@ -312,8 +286,7 @@ async function init() {
   copyLlmBtn.addEventListener('click', async () => {
     const currentList = selectedOf(currentTabList());
     if (currentList.length === 0) return;
-    const md = buildLlmMarkdown(pageData, currentList);
-    await navigator.clipboard.writeText(md);
+    await writeClipboard(WA_EXPORT.forLlm(pageData, currentList));
     copyLlmBtn.textContent = 'Copied!';
     setTimeout(() => { copyLlmBtn.textContent = 'Copy for LLM'; }, 2000);
   });
@@ -322,8 +295,8 @@ async function init() {
   copyNotesBtn.addEventListener('click', async () => {
     const currentList = selectedOf(currentTabList());
     if (currentList.length === 0) return;
-    const md = buildNotesMarkdown(pageData, currentList);
-    await navigator.clipboard.writeText(md);
+    const { text, html } = WA_EXPORT.forNotes(pageData, currentList);
+    await writeClipboard(text, html);
     copyNotesBtn.textContent = 'Copied!';
     setTimeout(() => { copyNotesBtn.textContent = 'Copy as Notes'; }, 2000);
   });
