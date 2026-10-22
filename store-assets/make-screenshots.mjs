@@ -185,10 +185,10 @@ function composite(name, title, sub, rawFile, overlay = '') {
   return 'file://' + file;
 }
 
-async function render(name, url) {
+async function render(name, url, dir = OUT) {
   const tab = await openTab(url, 1280, 800);
   await sleep(400);
-  await tab.capture(join(OUT, name + '.png'), { x: 0, y: 0, width: 1280, height: 800 });
+  await tab.capture(join(dir, name + '.png'), { x: 0, y: 0, width: 1280, height: 800 });
   await tab.close();
 }
 
@@ -249,6 +249,36 @@ try {
     const popup = `<div class="overlay" style="right:92px; top:152px; width:420px; border-radius:10px; overflow:hidden;
       box-shadow:0 2px 6px rgba(0,0,0,.12), 0 24px 60px rgba(0,0,0,.28); background:#fff;"> <img src="popup.png" style="display:block; width:420px;"></div>`;
     await render('5-private', composite('5', 'Your highlights stay in your browser', 'No account, no tracking, nothing uploaded. Switch it off on any site.', '5.png', popup));
+  }
+  // Social image (not a store screenshot): a note can be a thought or a question. The copied
+  // highlights are pasted into a generic, unbranded chat box and sent as they are.
+  {
+    const question = 'So when should I feed it if I want to bake at 9am?';
+    const hl = HL.map(a => (a.id === 'h4' ? { ...a, comment: question } : a));
+    const t = await articleWith(hl);
+    await t.click('wa-panel-tab');
+    await sleep(700);
+    await t.click('wa-panel-check', 0); // keep only the two highlights that carry notes
+    await t.click('wa-panel-check', 2);
+    await sleep(300);
+    await t.capture(join(RAW, '6.png'));
+    await t.close();
+
+    const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const mark = (s) => `<span style="background:linear-gradient(transparent 58%, #fde68a 58%); color:#1a1a1a; font-weight:600;">${s}</span>`;
+    const md = esc(markdownFor([hl[1], hl[3]])).replace(esc('My note: ' + question), mark(esc('My note: ' + question)));
+    const chat = `<div class="overlay" style="left:112px; top:206px; width:600px; background:#fff; border:1px solid #e4ddcf; border-radius:16px;
+      box-shadow:0 24px 60px rgba(60,45,20,.28); padding:16px 18px 14px; font-family:-apple-system,BlinkMacSystemFont,sans-serif;">
+      <div style="font:600 11px -apple-system,sans-serif; letter-spacing:.1em; text-transform:uppercase; color:#a08a5c; margin-bottom:10px;">Pasted into any AI chat</div>
+      <pre style="margin:0; white-space:pre-wrap; word-break:break-word; font:12.5px/1.55 ui-monospace, Menlo, monospace; color:#6b6458;">${md}</pre>
+      <div style="display:flex; justify-content:flex-end; margin-top:6px;">
+        <div style="width:32px; height:32px; border-radius:50%; background:#1a1a1a; display:flex; align-items:center; justify-content:center;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        </div>
+      </div></div>`;
+    const SOCIAL = join(HERE, 'social');
+    mkdirSync(SOCIAL, { recursive: true });
+    await render('ask-ai', composite('6', 'A note can be a thought, or a question', 'Copy for LLM keeps each note under the line it is about. Paste it into any AI chat and send.', '6.png', chat), SOCIAL);
   }
   console.log('done →', OUT);
 } finally {
