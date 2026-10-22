@@ -21,11 +21,12 @@ FEATURES
 - Works on JavaScript-rendered sites (React, Vue, Next.js) — highlights are restored after the page finishes rendering
 - Storage usage indicator so you always know how much space is used
 - Browse every site you have annotated, and remove a site's highlights when you no longer need them
-- Clear all highlights on the current page in one click
+- Clear all highlights on the current page
 
 PRIVACY
 
 - All data is stored locally in your browser
+- Websites cannot read your notes, including while you are typing one
 - No data is sent to any external server
 - No analytics, no tracking, no accounts
 - Open source (GPL v3)
@@ -42,4 +43,12 @@ TIPS
 - Click a highlight to unhighlight or add/edit a note
 - Press Cmd+Enter (Mac) or Ctrl+Enter (Windows and Linux) to save a note quickly
 - Open the side panel to review all highlights on the current page
-- Data is stored locally — clearing browser data may delete your notes
+
+GOOD TO KNOW
+
+- The website you are on can see which text you highlighted (not your notes) and that the extension is installed, because highlights are drawn on the page
+- Notes are not encrypted. Anyone who can use your computer or your Chrome profile can read them
+- There is no backup or sync. Uninstalling the extension or clearing browser data deletes your highlights and notes
+- If a page hides text inside a passage you highlight, that text is copied too. Read what you paste before sending it to an AI
+- Chrome does not let extensions run on its own pages, the Chrome Web Store, or the built-in PDF viewer
+- Provided as is, without warranty (see the GPL v3 license)
