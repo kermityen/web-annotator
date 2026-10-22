@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Web Annotator",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Highlight text on any webpage, add notes, and copy as markdown for LLM or note-taking apps. All data stays local.",
   "author": "Kermit Yen",
   "homepage_url": "https://github.com/kermityen/web-annotator",
@@ -10,6 +10,11 @@
     "service_worker": "background.js"
   },
   "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["guard.js"],
+      "run_at": "document_start"
+    },
     {
       "matches": ["<all_urls>"],
       "js": ["ui-styles.js", "export-format.js", "content.js"],

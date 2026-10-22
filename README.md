@@ -21,7 +21,19 @@ Highlight text on any webpage, add notes, and copy them out as markdown for an A
 
 - All highlights and notes are stored locally in your browser (`chrome.storage.local`)
 - The extension makes no network requests. Nothing is uploaded, and there are no analytics, tracking, or accounts
-- The side panel and note editor run in an isolated part of the page, so the website you are on cannot read the notes you have saved
+- The side panel and note editor run in an isolated part of the page, so the website you are on cannot read your notes, either the ones you have saved or what you type while writing one
+
+### What it does not protect
+
+- **The website can see what you highlighted.** Highlights are drawn on the page itself, so the site can tell which passages you marked and whether a highlight has a note. It cannot read the note text. It can also tell that the extension is installed
+- **Your notes are not encrypted.** Anyone who can use your computer or your Chrome profile can read them
+- **There is no backup or sync.** Uninstalling the extension or clearing browser data deletes your highlights and notes, and they cannot be recovered
+- **Copied quotes can include hidden text.** If a page hides text inside a passage you highlight, that text is copied too. Read what you paste before sending it to an AI
+- **Some pages are off-limits.** Chrome does not let extensions run on its own pages, the Chrome Web Store, or the built-in PDF viewer
+
+### Fixed in 1.0.3
+
+In 1.0.2 and earlier, a website could read a note while you were typing it on that website's page (not notes you had already saved, and not notes written on other sites). 1.0.3 blocks this. Chrome updates the extension automatically.
 
 Full policy: [privacy-policy.html](https://kermityen.github.io/web-annotator/privacy-policy.html)
 

@@ -226,6 +226,9 @@
       uiRoot = uiHost.attachShadow({ mode: 'closed' });
       applyUiStyles(uiRoot);
       bindUiRootEvents(uiRoot);
+      // guard.js stops keyboard, input and clipboard events from our UI before the page sees them.
+      WA_GUARD.host = uiHost;
+      WA_GUARD.onKeydown = onUiKeydown;
     }
     if (!uiHost.isConnected) document.documentElement.appendChild(uiHost);
     return uiRoot;
@@ -258,12 +261,8 @@
   }
 
   function bindUiRootEvents(root) {
-    // Keep typing inside our UI to ourselves: page keyboard shortcuts must not fire while you
-    // write a note, and the page's key listeners should not see what you type.
-    for (const type of ['keydown', 'keyup', 'keypress', 'beforeinput', 'input',
-      'compositionstart', 'compositionupdate', 'compositionend', 'paste', 'copy', 'cut']) {
-      root.addEventListener(type, (e) => e.stopPropagation());
-    }
+    // Typing inside our UI is kept from the page by guard.js, so page shortcuts don't fire while
+    // you write a note and the page's listeners never see what you type.
 
     // A press inside our UI dismisses whichever floating piece it did not land on.
     root.addEventListener('mousedown', (e) => {
@@ -530,6 +529,15 @@
   let noteSaving = false;
   let noteOpenToken = 0;
 
+  // Note editor shortcuts. Called by guard.js for trusted keydowns from our UI, because the
+  // guard stops those events before they reach the textarea.
+  function onUiKeydown(e) {
+    if (!activeMarkPopover || e.isComposing) return;
+    if (uiRoot.activeElement !== activeMarkPopover.querySelector('.wa-mp-textarea')) return;
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); closeMarkPopover(true); }
+    if (e.key === 'Escape') closeMarkPopover(false);
+  }
+
   async function closeMarkPopover(save) {
     const popover = activeMarkPopover;
     if (!popover || noteSaving) return;
@@ -587,12 +595,6 @@
 
     popover.querySelector('.wa-mp-save').addEventListener('click', (e) => { if (e.isTrusted) closeMarkPopover(true); });
     popover.querySelector('.wa-mp-cancel').addEventListener('click', (e) => { if (e.isTrusted) closeMarkPopover(false); });
-
-    textarea.addEventListener('keydown', (e) => {
-      if (e.isComposing) return;
-      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); closeMarkPopover(true); }
-      if (e.key === 'Escape') closeMarkPopover(false);
-    });
 
     activeMarkPopover = popover;
     activeMarkId = id;

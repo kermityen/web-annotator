@@ -574,6 +574,52 @@ const tests = {
     check('T13 打筆記時不會觸發網頁快捷鍵，網頁也看不到你打的字', pageSaw === '' && saved, `pageKeydownListenerSaw=${JSON.stringify(pageSaw)} noteSaved=${saved}`);
   },
 
+  async T21_capture_listeners_cannot_read_note_typing(p) {
+    const PATH = '/keylogger.html';
+    await p.fresh(SECURE + PATH);
+    await cdp.send('Browser.grantPermissions', { origin: SECURE, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+    await p.evalMain(`navigator.clipboard.writeText('PASTED').then(() => true)`);
+
+    // Type a note with real keys, inserted text and a paste, then save with Ctrl+Enter.
+    await p.selectPhrase('#p1', 'quick brown fox');
+    await p.clickClass('wa-sel-note-btn');
+    await p.waitNoteFocused();
+    await p.evalMain(`window.__log = ''`);
+    await p.typeKeys('zq');
+    await p.type('LEAKME');
+    // IME (e.g. Zhuyin): text is composed first, then committed.
+    await p.send('Input.imeSetComposition', { text: '祕', selectionStart: 1, selectionEnd: 1 });
+    await p.send('Input.imeSetComposition', { text: '祕密', selectionStart: 2, selectionEnd: 2 });
+    await p.type('祕密');
+    await p.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86, modifiers: 2, commands: ['paste'] });
+    await p.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86, modifiers: 2 });
+    await p.key('Enter', 2);
+    await sleep(500);
+    const rec = await p.stored(SECURE, PATH);
+    const saved = !!rec && rec.annotations.some(a => a.comment === 'zqLEAKME祕密PASTED');
+
+    // Escape still cancels a note.
+    await p.selectPhrase('#p1', 'lazy dog');
+    await p.clickClass('wa-sel-note-btn');
+    await p.waitNoteFocused();
+    await p.type('x');
+    await p.key('Escape');
+    await sleep(300);
+    const escClosed = (await p.byClass('wa-mark-popover')).length === 0;
+    const fullLog = await p.evalMain('window.__log');
+    // Escape closes the editor on keydown, so its keyup lands on the page after the editor is
+    // gone. That reveals no note text; anything else in the log does.
+    const pageSaw = fullLog.split('|').filter(s => s && s !== 'Escape').join('|');
+
+    // The page's own text box must still reach the page's listeners.
+    await p.evalMain(`document.getElementById('own').focus()`);
+    await p.typeKeys('ab');
+    const ownSeen = (await p.evalMain('window.__log')).length > fullLog.length;
+
+    check('T21 網頁用 capture 監聽也看不到筆記打的字（按鍵／輸入／貼上）', pageSaw === '' && saved && escClosed && ownSeen,
+      `pageCaptureListenersSaw=${JSON.stringify(pageSaw)} noteSaved=${saved} escapeClosed=${escClosed} pageOwnTextboxStillLogged=${ownSeen}`);
+  },
+
   async T14_hostile_page_css_cannot_hide_ui(p) {
     const PATH = '/hostile.html';
     await p.fresh(SECURE + PATH);
